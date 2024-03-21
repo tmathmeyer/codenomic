@@ -158,6 +158,11 @@ def gameserver():
       <a href="/submit">Submit A Patch</a><br />
       <a href="/proposal">View Proposal</a><br />
       <a href="/sign">Signoff Current Proposal</a><br />
+      <hr />
+      You can sign snippits of code using GPG: <br />
+      <pre>
+      $ gpg --clearsign -o signed_code.txt codenomic.py
+      </pre>
       </body></html>
       ''', turn=name, signatures=signatures,
            required=len(PLAYERS),
@@ -245,11 +250,13 @@ def gameserver():
 def main(args):
   if len(args) != 2:
     raise Exception('GAME OVER')
-
   if args[1] == '--gameserver':
     gameserver()
   elif args[1] == '--hypervisor':
     hypervisor()
+  elif args[1] == '--cleanup':
+    kill_codenomic_process('hypervisor')
+    kill_codenomic_process('gameserver')
 
 
 if __name__ == '__main__':
