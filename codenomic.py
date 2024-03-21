@@ -5,22 +5,23 @@ import os
 import psutil
 import pyinotify
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 
 
 PENDING_PROPOSAL_FILE = '/opt/codenomic/pending-proposal'
 PROPOSAL_FILE = '/opt/codenomic/proposal'
+SOURCE_FILE = '/opt/codenomic/codenomic.py'
+ACTIVE_PLAYER = '/opt/codenomic/playerindex'
 
 ACTIVE_SIGNATURES = set()
 PLAYERS = [
   ('Ted', '3E430BA8997F61554719E47A7854BF294E6DBC84'),
-  ('Other', '123534253'),
 ]
 
 NAME_LOOKUP = {key:name for name,key in PLAYERS}
-
-
 
 
 def check_signature(file, expected_key=None):
@@ -45,9 +46,9 @@ def check_signature(file, expected_key=None):
 def get_active_player():
   if not PLAYERS:
     return None, None
-  if not os.path.exists('/opt/codenomic/playerindex'):
+  if not os.path.exists(ACTIVE_PLAYER):
     return PLAYERS[0]
-  with open('/opt/codenomic/playerindex', 'r') as f:
+  with open(ACTIVE_PLAYER, 'r') as f:
     try:
       index = int(f.read().strip())
       if index >= len(PLAYERS):
@@ -55,6 +56,35 @@ def get_active_player():
       return PLAYERS[index]
     except:
       return PLAYERS[0]
+
+
+def update_next_active_player():
+  current = get_active_player() + 1
+  if current >= len(PLAYERS):
+    current = 0
+  with open(ACTIVE_PLAYER, 'w') as f:
+    f.write(str(current))
+
+
+def check_required_signatures():
+  if len(ACTIVE_SIGNATURES) < len(PLAYERS):
+    return
+  for sig in ACTIVE_SIGNATURES:
+    if sig not in NAME_LOOKUP:
+      return
+  update_next_active_player()
+  with open(SOURCE_FILE, 'w') as dest:
+    with open(PROPOSAL_FILE, 'r') as src:
+      dest.write(src.read())
+  os.remove(PROPOSAL_FILE)
+
+
+def strip_signature(source, destination):
+  result = subprocess.run(f'gpg --output {destination} {source}',
+                          encoding='utf-8',
+                          shell=True,
+                          stderr=subprocess.PIPE,
+                          stdout=subprocess.PIPE)
 
 
 def kill_codenomic_process(mode:str):
@@ -84,7 +114,8 @@ def hypervisor():
   # having been opened in write mode.
   class EventHandler(pyinotify.ProcessEvent):
     def process_IN_CLOSE_WRITE(self, event):
-      if event.pathname == '/opt/codenomic/codenomic.py':
+      if event.pathname == SOURCE_FILE:
+        print('RESTARTING SERVER')
         kill_codenomic_process('gameserver')
         fork_and_abandon_child('gameserver')
       else:
@@ -105,8 +136,10 @@ def hypervisor():
 def gameserver():
   # When the game server is started, it must first always ensure the
   # hypervisor is fresh. So we kill it and restart it.
-  # kill_codenomic_process('hypervisor')
-  # fork_and_abandon_child('hypervisor')
+  print('RESTARTING HYPERVISOR')
+  kill_codenomic_process('hypervisor')
+  fork_and_abandon_child('hypervisor')
+  print(f'There are {len(PLAYERS)} players')
 
   # Start hosting the webserver
   @bottle.route('/')
@@ -148,6 +181,17 @@ def gameserver():
   def sign():
     if not os.path.exists(PROPOSAL_FILE):
       return '<html><body><h1>No Active Proposal</h1></body></html>'
+    return bottle.template('''
+      <html><body>
+      <form action="/upload/sign"
+            method="post"
+            enctype="multipart/form-data">
+        Upload a signed copy of the proposed code to sign off.
+        <input type="file" name="upload" /> <br />
+        <input type="submit" value="Upload signature" />
+      </form>
+      </body></html>
+      ''')
 
   @bottle.route('/submit')
   def submit():
@@ -157,11 +201,25 @@ def gameserver():
             method="post"
             enctype="multipart/form-data">
         Upload a signed file to replace the codenomic server:
-        <input type="file" name="upload" />
-        <input type="submit" value="Start upload" />
+        <input type="file" name="upload" /> <br />
+        <input type="submit" value="Upload new code" />
       </form>
       </body></html>
       ''')
+
+  @bottle.route('/upload/sign', method='POST')
+  def upload_signature():
+    global ACTIVE_SIGNATURES
+    upload = bottle.request.files.get('upload')
+    _, tempfile = tempfile.mkstemp()
+    upload.save(tempfile)
+    ok, key = check_signature(tempfile)
+    os.remove(tempfile)
+    if not ok:
+      return f'<html><body><h1>Unauthorized: {key}</h1></body></html>'
+    ACTIVE_SIGNATURES.add(key)
+    check_required_signatures()
+    return '<html><body><h1>Signature Approved</h1><br /><a href="/">Home</a></body></html>'
 
   @bottle.route('/upload/submit', method='POST')
   def upload_submit():
@@ -173,15 +231,15 @@ def gameserver():
     name, pub = get_active_player()
     ok, key = check_signature(PENDING_PROPOSAL_FILE, pub)
     if not ok:
-      #os.remove(PENDING_PROPOSAL_FILE)
+      os.remove(PENDING_PROPOSAL_FILE)
       return f'<html><body><h1>Unauthorized: {key}</h1></body></html>'
-    shutil.move(PENDING_PROPOSAL_FILE, PROPOSAL_FILE)
+    strip_signature(PENDING_PROPOSAL_FILE, PROPOSAL_FILE)
+    os.remove(PENDING_PROPOSAL_FILE)
     ACTIVE_SIGNATURES = set([key])
+    check_required_signatures()
     return '<html><body><h1>Accepted</h1><br /><a href="/">Acquire approvals</a></body></html>'
 
   bottle.run(host='localhost', port=8080)
-
-
 
 
 def main(args):
